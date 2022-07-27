@@ -21,8 +21,16 @@ git submodule update
 ./autogen.sh
 LIBS=-lpthread ./configure --prefix=/usr/local --enable-evdns=no --with-openssl=/opt/boringssl-fips
 
-# apply patch for fixes in libusual when using BoringSSL
+git config --global user.email "database-team+pgbouncer@cloudflare.com"
+git config --global user.name "database-team pgbouncer"
+
+# apply patch for fixes in libusual submodule for use with BoringSSL
 git apply ./patches/0001-Some-BoringSSL-fixes-for-libusual.patch
+cd ./lib
+git add .
+git commit -a --allow-empty-message -m ""
+# update PgBouncer to track newly updated submodule
+cd ..
 git add ./lib
 git commit -a --allow-empty-message -m ""
 
