@@ -1,12 +1,3 @@
-2022.7.5
-- 2022-07-26 DB-1926: Apply libusual BoringSSL patch while building PgBouncer
-
-2022.7.4
-- 2022-07-21 DB-1926: Freshly compile PgBouncer to use boringssl in build pipeline
-
-2022.7.3
-- 2022-07-15 DB-1785: Refactor to support multiple database hosts per user
-
 2022.7.2
 - 2022-07-06 DB-1785: Prevent stale password by not caching previous user auth_query
 - 2022-07-06 DB-1785: Test user password is not stale when changed at Postgres
