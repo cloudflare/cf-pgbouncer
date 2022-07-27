@@ -1,3 +1,9 @@
+2022.7.7
+- 2022-07-27 DB-1926: Fix removed release note entries
+- 2022-07-27 DB-1926: Configure automated service email before git committing
+- 2022-07-27 Release 2022.7.6
+- 2022-07-27 DB-1926: Commit changes from patchfile application for cfsetup
+
 2022.7.5
 - 2022-07-26 DB-1926: Apply libusual BoringSSL patch while building PgBouncer
 
