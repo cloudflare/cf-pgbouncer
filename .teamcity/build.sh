@@ -23,6 +23,8 @@ LIBS=-lpthread ./configure --prefix=/usr/local --enable-evdns=no --with-openssl=
 
 # apply patch for fixes in libusual when using BoringSSL
 git apply ./patches/0001-Some-BoringSSL-fixes-for-libusual.patch
+git add ./lib
+git commit -a --allow-empty-message -m ""
 
 make clean all
 sudo make install
