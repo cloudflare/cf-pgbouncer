@@ -1,0 +1,49 @@
+From 4c721c2a26501367c1573c958453e31e9036faec Mon Sep 17 00:00:00 2001
+From: Ignat Korchagin <ignat@cloudflare.com>
+Date: Thu, 22 Jul 2021 21:02:46 +0100
+Subject: [PATCH] Some BoringSSL fixes for libusual
+
+  * change the order of freeing SSL context and SSL object: SSL object is
+    created from the context, so they should be freed in the reverse order
+
+  * use OPENSSL_free on object allocated by BoringSSL: BoringSSL does more
+    than just freeing the memory, so calling free() on object allocated by
+    BoringSSL may create a segfault
+---
+ usual/tls/tls.c          | 2 +-
+ usual/tls/tls_conninfo.c | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/lib/usual/tls/tls.c b/lib/usual/tls/tls.c
+index 3fd0c4d..6b14ecb 100644
+--- a/lib/usual/tls/tls.c
++++ b/lib/usual/tls/tls.c
+@@ -498,8 +498,8 @@ tls_free(struct tls *ctx)
+ void
+ tls_reset(struct tls *ctx)
+ {
+-	SSL_CTX_free(ctx->ssl_ctx);
+ 	SSL_free(ctx->ssl_conn);
++	SSL_CTX_free(ctx->ssl_ctx);
+ 	X509_free(ctx->ssl_peer_cert);
+ 
+ 	ctx->ssl_conn = NULL;
+diff --git a/lib/usual/tls/tls_conninfo.c b/lib/usual/tls/tls_conninfo.c
+index 9be5293..7fdda9e 100644
+--- a/lib/usual/tls/tls_conninfo.c
++++ b/lib/usual/tls/tls_conninfo.c
+@@ -190,9 +190,9 @@ tls_free_conninfo(struct tls_conninfo *conninfo) {
+ 	if (conninfo != NULL) {
+ 		free(conninfo->hash);
+ 		conninfo->hash = NULL;
+-		free(conninfo->subject);
++		OPENSSL_free(conninfo->subject);
+ 		conninfo->subject = NULL;
+-		free(conninfo->issuer);
++		OPENSSL_free(conninfo->issuer);
+ 		conninfo->issuer = NULL;
+ 		free(conninfo->version);
+ 		conninfo->version = NULL;
+-- 
+2.20.1
+

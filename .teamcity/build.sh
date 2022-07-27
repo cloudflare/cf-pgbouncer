@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/bin/bash -x
 
 set -euo pipefail
 
-# When V is 1, print commands and build progress.
+# when V is 1, print commands and build progress.
 export V=1
 
 DEBIAN_BUILD_VERSION=$(grep -o '^[0-9]*' /etc/debian_version)
@@ -20,6 +20,9 @@ git submodule update
 
 ./autogen.sh
 LIBS=-lpthread ./configure --prefix=/usr/local --enable-evdns=no --with-openssl=/opt/boringssl-fips
+
+# apply patch for fixes in libusual when using BoringSSL
+git apply ./patches/0001-Some-BoringSSL-fixes-for-libusual.patch
 
 make clean all
 sudo make install
