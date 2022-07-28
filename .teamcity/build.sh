@@ -29,10 +29,10 @@ git apply ./patches/0001-Some-BoringSSL-fixes-for-libusual.patch
 cd ./lib
 git add .
 git commit -a --allow-empty-message -m ""
-# update PgBouncer to track newly updated submodule
+# update PgBouncer to track newly updated submodule.
+# Don't commit (committing will append commit hash to package version and break high-state).
 cd ..
 git add ./lib
-git commit -a --allow-empty-message -m ""
 
 make clean all
 sudo make install
