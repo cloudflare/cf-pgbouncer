@@ -2,6 +2,7 @@
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
  *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
+ * Copyright (c) 2022 Cloudflare, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -408,8 +409,8 @@ void pktbuf_write_RowDescription(PktBuf *buf, const char *tupdesc, ...)
  * send DataRow.
  *
  * tupdesc keys:
- * 'i' - int4
- * 'q' - int8
+ * 'i' - int4, limited to 2^31
+ * 'q' - int8, limited to 2^63
  * 's' - string to text
  * 'b' - bytes to bytea
  * 'N' - uint64_t to numeric
@@ -429,10 +430,10 @@ void pktbuf_write_DataRow(PktBuf *buf, const char *tupdesc, ...)
 		const char *val = NULL;
 
 		if (tupdesc[i] == 'i') {
-			snprintf(tmp, sizeof(tmp), "%d", va_arg(ap, int));
+			snprintf(tmp, sizeof(tmp), "%d", va_arg(ap, int) & 0x7fffffff);
 			val = tmp;
 		} else if (tupdesc[i] == 'q' || tupdesc[i] == 'N') {
-			snprintf(tmp, sizeof(tmp), "%" PRIu64, va_arg(ap, uint64_t));
+			snprintf(tmp, sizeof(tmp), "%" PRIu64, va_arg(ap, uint64_t) & 0x7fffffffffffffff);
 			val = tmp;
 		} else if (tupdesc[i] == 's') {
 			val = va_arg(ap, char *);

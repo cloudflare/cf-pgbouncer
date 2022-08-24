@@ -2,6 +2,7 @@
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
  *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
+ * Copyright (c) 2022 Cloudflare, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -86,8 +87,11 @@ enum SSLMode {
 
 typedef struct PgSocket PgSocket;
 typedef struct PgUser PgUser;
+typedef struct PgUserEvent PgUserEvent;
 typedef struct PgDatabase PgDatabase;
+typedef struct PgUserPassword PgUserPassword;
 typedef struct PgPool PgPool;
+typedef struct PgPoolEvent PgPoolEvent;
 typedef struct PgStats PgStats;
 typedef union PgAddr PgAddr;
 typedef enum SocketState SocketState;
@@ -288,7 +292,16 @@ struct PgPool {
 
 	bool welcome_msg_ready:1;
 
-	uint16_t rrcounter;		/* round-robin counter */
+	int pool_size;		/* max server connections in one pool */
+	int16_t rrcounter;		/* round-robin counter */
+};
+
+/*
+ * An association of an event occurring for a pool, such as the pool's config being reloaded.
+ */
+struct PgPoolEvent {
+	struct PgPool *pool;
+	struct event *ev;
 };
 
 #define pool_connected_server_count(pool) ( \
@@ -308,8 +321,6 @@ struct PgPool {
 /*
  * A user in login db.
  *
- * FIXME: remove ->head as ->tree_node should be enough.
- *
  * For databases where remote user is forced, the pool is:
  * first(db->forced_user->pool_list), where pool_list has only one entry.
  *
@@ -317,18 +328,26 @@ struct PgPool {
  * which user has logged in.
  */
 struct PgUser {
-	struct List head;		/* used to attach user to list */
 	struct List pool_list;		/* list of pools where pool->user == this user */
 	struct AANode tree_node;	/* used to attach user to tree */
 	char name[MAX_USERNAME];
-	char passwd[MAX_PASSWORD];
+	char passwd[MAX_PASSWORD];	/* password stored in auth_file, empty if user not in auth_file */
 	uint8_t scram_ClientKey[32];
 	uint8_t scram_ServerKey[32];
 	bool has_scram_keys;		/* true if the above two are valid */
 	bool mock_auth;			/* not a real user, only for mock auth */
+	bool from_auth_file;	/* true if user is parsed from auth_file */
 	int pool_mode;
 	int max_user_connections;	/* how much server connections are allowed */
 	int connection_count;	/* how much connections are used by user now */
+};
+
+/*
+ * An association of an event occurring for a user, such as the user's config being reloaded.
+ */
+struct PgUserEvent {
+	struct PgUser *user;
+	struct event *ev;
 };
 
 /*
@@ -337,6 +356,7 @@ struct PgUser {
 struct PgDatabase {
 	struct List head;
 	char name[MAX_DBNAME];	/* db name for clients */
+	struct AATree user_passwds;	/* user passwords for this database from auth_query */
 
 	/*
 	 * configuration
@@ -368,10 +388,13 @@ struct PgDatabase {
 	usec_t inactive_time;	/* when auto-database became inactive (to kill it after timeout) */
 	unsigned active_stamp;	/* set if autodb has connections */
 	int connection_count;	/* total connections for this database in all pools */
-
-	struct AATree user_tree;	/* users that have been queried on this database */
 };
 
+struct PgUserPassword {
+	struct AANode tree_node;	/* used to attach user password to tree */
+	char username[MAX_USERNAME];
+	char passwd[MAX_PASSWORD];
+};
 
 /*
  * A client or server connection.
@@ -593,6 +616,6 @@ last_socket(struct StatList *slist)
 void load_config(void);
 
 
-bool set_config_param(const char *key, const char *val);
+bool set_config_param(const char *sect, const char *key, const char *val);
 void config_for_each(void (*param_cb)(void *arg, const char *name, const char *val, const char *defval, bool reloadable),
 		     void *arg);

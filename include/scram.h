@@ -2,6 +2,7 @@
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
  *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
+ * Copyright (c) 2022 Cloudflare, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -40,6 +41,7 @@ PasswordType get_password_type(const char *shadow_pass);
 char *build_client_first_message(ScramState *scram_state);
 char *build_client_final_message(ScramState *scram_state,
 				 const PgUser *user,
+				 const PgDatabase *db,
 				 const char *server_nonce,
 				 const char *salt,
 				 int saltlen,

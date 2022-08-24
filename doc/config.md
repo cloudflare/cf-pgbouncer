@@ -97,6 +97,9 @@ statement
 :   Server is released back to pool after query finishes. Transactions
     spanning multiple statements are disallowed in this mode.
 
+This can also be set per database in the `[databases]` section and per user
+in the `[users]` section or by using the command `SET USER [user] = 'pool_mode=[mode]'`.
+
 ### max_client_conn
 
 Maximum number of client connections allowed.
@@ -178,7 +181,8 @@ associated with a pool, which is either the user specified for the
 server connection or in absence of that the user the client has
 connected as.
 
-This can also be set per user in the `[users]` section.
+This can also be set per user in the `[users]` section, or by using
+the command `SET USER [user] = 'max_user_connections=[new limit]`.
 
 Note that when you hit the limit, closing a client connection to one
 pool will not immediately allow a server connection to be established
@@ -1005,6 +1009,9 @@ Override of the global `auth_user` setting, if specified.
 Set the maximum size of pools for this database.  If not set,
 the `default_pool_size` is used.
 
+This can also be set per database in the `[databases]` section and per pool
+in the `[pools]` or by using the command `SET POOL [user.database] = 'pool_size=[size]'`.
+
 ### min_pool_size
 
 Set the minimum pool size for this database. If not set, the global `min_pool_size` is
@@ -1067,6 +1074,37 @@ database or default `pool_mode` is used.
 
 Configure a maximum for the user (i.e. all pools with the user will
 not have more than this many server connections).
+
+If a user is configured with `max_user_connections` in the `[users]`
+section, any of their connections that exceed the new limit will
+automatically be closed in priority of idle, used, tested, then active
+connections.
+
+## Section [pools]
+
+This section contains key=value lines like
+
+    user1.database1 = settings
+
+where the key is will be taken as a pool name (user name to database name pair)
+and the value as a list of key=value pairs of configuration settings specific
+for this pool.
+Example:
+
+    user1.database1 = pool_size=size
+
+Only one setting is available here.
+
+### pool_size
+
+Set the maximum number of connections for this pool.  If not set, the
+`default_pool_size` is used.  If `pool_size` is configured for both
+a pool under `[pools]` and the pool's database under `[databases]`,
+the minimum `pool_size` between both is used.
+
+If a pool is configured with `pool_size` in the `[pools]` section,
+any of its connections that exceed the new size will automatically
+be closed in priority of used, idle, then active connections.
 
 
 ## Include directive

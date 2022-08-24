@@ -2,6 +2,7 @@
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
  *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
+ * Copyright (c) 2022 Cloudflare, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -20,6 +21,8 @@
 bool parse_database(void *base, const char *name, const char *connstr) _MUSTCHECK;
 
 bool parse_user(void *base, const char *name, const char *params) _MUSTCHECK;
+
+bool parse_pool(void *base, const char *name, const char *params) _MUSTCHECK;
 
 /* user file parsing */
 bool load_auth_file(const char *fn)  /* _MUSTCHECK */;

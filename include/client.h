@@ -2,6 +2,7 @@
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
  *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
+ * Copyright (c) 2022 Cloudflare, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -19,3 +20,4 @@
 bool client_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *pkt)  _MUSTCHECK;
 bool set_pool(PgSocket *client, const char *dbname, const char *username, const char *password, bool takeover) _MUSTCHECK;
 bool handle_auth_query_response(PgSocket *client, PktHdr *pkt);
+PgDatabase *client_database(PgSocket *client)  _MUSTCHECK;

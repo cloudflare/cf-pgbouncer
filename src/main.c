@@ -2,6 +2,7 @@
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
  *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
+ * Copyright (c) 2022 Cloudflare, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -65,7 +66,7 @@ static void usage(const char *exe)
 }
 
 /* global libevent handle */
-struct event_base *pgb_event_base;
+struct event_base *pgb_event_base = NULL;
 
 /* async dns handler */
 struct DNSContext *adns;
@@ -332,15 +333,18 @@ static const struct CfSect config_sects [] = {
 		.sect_name = "users",
 		.set_key = parse_user,
 	}, {
+		.sect_name = "pools",
+		.set_key = parse_pool,
+	}, {
 		.sect_name = NULL,
 	}
 };
 
 static struct CfContext main_config = { config_sects, };
 
-bool set_config_param(const char *key, const char *val)
+bool set_config_param(const char *sect, const char *key, const char *val)
 {
-	return cf_set(&main_config, "pgbouncer", key, val);
+	return cf_set(&main_config, sect, key, val);
 }
 
 void config_for_each(void (*param_cb)(void *arg, const char *name, const char *val, const char *defval, bool reloadable),
@@ -683,7 +687,7 @@ static void write_pidfile(void)
 static void check_limits(void)
 {
 	struct rlimit lim;
-	int total_users = statlist_count(&user_list);
+	int total_users = user_tree.count;
 	int fd_count;
 	int err;
 	struct List *item;

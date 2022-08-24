@@ -2,6 +2,7 @@
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
  *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
+ * Copyright (c) 2022 Cloudflare, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -364,22 +365,49 @@ fail:
 	return false;
 }
 
+static PgUser *get_preconfigured_user(const char *name)
+{
+	PgUser *user;
+
+	if (name == NULL) {
+		log_error("empty user name");
+		return NULL;
+	}
+
+	user = find_user(name);
+	if (user != NULL)
+		return user;
+
+	/* represents a user pre-configuration, not a connected logged-in user */
+	user = add_user(name, "");
+	if (user == NULL) {
+		log_error("cannot create user, no memory?");
+		return NULL;
+	}
+
+	return user;
+}
+
 bool parse_user(void *base, const char *name, const char *connstr)
 {
 	char *p, *key, *val, *tmp_connstr;
 	PgUser *user;
-	struct CfValue cv;
+	struct CfValue pool_mode_cv;
 	int pool_mode = POOL_INHERIT;
+	struct CfValue max_user_connections_cv;
 	int max_user_connections = -1;
 
-
-	cv.value_p = &pool_mode;
-	cv.extra = (const void *)pool_mode_map;
+	pool_mode_cv.value_p = &pool_mode;
+	pool_mode_cv.extra = (const void *)pool_mode_map;
+	max_user_connections_cv.value_p = &max_user_connections;
 
 	tmp_connstr = strdup(connstr);
 	if (!tmp_connstr) {
 		log_error("out of memory");
 		return false;
+	} else if (*tmp_connstr == '\0') {
+		log_error("empty user parameters");
+		goto fail;
 	}
 
 	p = tmp_connstr;
@@ -393,35 +421,160 @@ bool parse_user(void *base, const char *name, const char *connstr)
 		}
 
 		if (strcmp("pool_mode", key) == 0) {
-			if (!cf_set_lookup(&cv, val)) {
+			if (!cf_set_lookup(&pool_mode_cv, val)) {
 				log_error("invalid pool mode: %s", val);
 				goto fail;
 			}
 		} else if (strcmp("max_user_connections", key) == 0) {
-			max_user_connections = atoi(val);
+			if (!cf_set_int(&max_user_connections_cv, val)) {
+				log_error("invalid max user connections: %s", val);
+				goto fail;
+			}
 		} else {
 			log_error("unrecognized user parameter: %s", key);
 			goto fail;
 		}
 	}
 
-	user = find_user(name);
-	if (!user) {
-		user = add_user(name, "");
-		if (!user) {
-			log_error("cannot create user, no memory?");
-			goto fail;
-		}
-	}
+	user = get_preconfigured_user(name);
+	if (user == NULL)
+		goto fail;
 
 	user->pool_mode = pool_mode;
 	user->max_user_connections = max_user_connections;
+	notify_user_event(user, handle_user_cf_update);
 
 	free(tmp_connstr);
 	return true;
 
 fail:
 	free(tmp_connstr);
+	return false;
+}
+
+static bool parse_pool_name(char *pool_name, const char **username_p, const char **dbname_p)
+{
+	if (pool_name[0] == '.' || pool_name[strlen(pool_name) - 1] == '.') {
+		log_error("invalid pool name '%s' contains misplaced delimiters", pool_name);
+		return false;
+	}
+	if ((*username_p = strtok(pool_name, ".")) == NULL) {
+		log_error("invalid pool name '%s' missing user name", pool_name);
+		return false;
+	}
+	if ((*dbname_p = strtok(NULL, ".")) == NULL) {
+		log_error("invalid pool name '%s' missing database name", pool_name);
+		return false;
+	}
+	if (strtok(NULL, ".") != NULL) {
+		log_error("invalid pool name '%s' contains multiple delimiters", pool_name);
+		return false;
+	}
+	return true;
+}
+
+static PgDatabase *get_preconfigured_database(const char *name)
+{
+	PgDatabase *db;
+	PgDatabase *auto_db;
+
+	db = find_database(name);
+	if (db != NULL)
+		return db;
+
+	db = add_database(name);
+	if (db == NULL) {
+		log_error("cannot create database, no memory?");
+		return NULL;
+	}
+
+	/* new databases are assumed to be an autodb */
+	auto_db = register_auto_database(name);
+	if (auto_db != NULL) {
+		log_info("registered new auto-database: db=%s", name);
+		return auto_db;
+	}
+
+	return db;
+}
+
+bool parse_pool(void *base, const char *name, const char *params)
+{
+	char *p = NULL, *key = NULL, *val = NULL;
+	char *tmp_pool_name = NULL, *tmp_pool_params = NULL;
+
+	struct CfValue pool_size_cv;
+	int pool_size = -1;
+
+	const char *username, *dbname;
+	PgUser *user = NULL;
+	PgDatabase *db = NULL;
+	PgPool *pool = NULL;
+
+	pool_size_cv.value_p = &pool_size;
+
+	tmp_pool_name = strdup(name);
+	if (tmp_pool_name == NULL) {
+		log_error("out of memory");
+		goto fail;
+	}
+
+	tmp_pool_params = strdup(params);
+	if (tmp_pool_params == NULL) {
+		log_error("out of memory");
+		return false;
+	} else if (*tmp_pool_params == '\0') {
+		log_error("empty pool parameters");
+		goto fail;
+	}
+
+	p = tmp_pool_params;
+	while (*p) {
+		p = cstr_get_pair(p, &key, &val);
+		if (p == NULL) {
+			log_error("syntax error in pool settings");
+			goto fail;
+		} else if (!key[0]) {
+			break;
+		}
+
+		if (strcmp("pool_size", key) == 0) {
+			if (!cf_set_int(&pool_size_cv, val)) {
+				log_error("invalid max pool size: %s", val);
+				goto fail;
+			}
+		} else {
+			log_error("unrecognized user parameter: %s", key);
+			goto fail;
+		}
+	}
+
+	if (!parse_pool_name(tmp_pool_name, &username, &dbname))
+		goto fail;
+
+	user = get_preconfigured_user(username);
+	if (user == NULL)
+		goto fail;
+
+	db = get_preconfigured_database(dbname);
+	if (db == NULL)
+		goto fail;
+
+	pool = get_pool(db, user);
+	if (pool == NULL) {
+		log_error("cannot create user, no memory?");
+		goto fail;
+	}
+	pool->pool_size = pool_size;
+	notify_pool_event(pool, handle_pool_cf_update);
+
+	free(tmp_pool_name);
+	free(tmp_pool_params);
+	return true;
+
+fail:
+	free(tmp_pool_name);
+	free(tmp_pool_params);
 	return false;
 }
 
@@ -455,7 +608,7 @@ static void copy_quoted(char *dst, const char *src, int len)
 	*dst = 0;
 }
 
-static void unquote_add_user(const char *username, const char *password)
+static PgUser *unquote_add_user(const char *username, const char *password)
 {
 	char real_user[MAX_USERNAME];
 	char real_passwd[MAX_PASSWORD];
@@ -467,6 +620,8 @@ static void unquote_add_user(const char *username, const char *password)
 	user = add_user(real_user, real_passwd);
 	if (!user)
 		log_warning("cannot create user, no memory");
+
+	return user;
 }
 
 static bool auth_loaded(const char *fn)
@@ -506,21 +661,22 @@ bool loader_users_check(void)
 	return load_auth_file(cf_auth_file);
 }
 
+static void disable_user_cb(void *arg, PgUser *user)
+{
+	user->passwd[0] = 0;
+	user->from_auth_file = false;
+}
+
 static void disable_users(void)
 {
-	PgUser *user;
-	struct List *item;
-
-	statlist_for_each(item, &user_list) {
-		user = container_of(item, PgUser, head);
-		user->passwd[0] = 0;
-	}
+	walk_users(disable_user_cb, NULL);
 }
 
 /* load list of users from auth_file */
 bool load_auth_file(const char *fn)
 {
-	char *user, *password, *buf, *p;
+	char *username, *password, *buf, *p;
+	PgUser *user;
 
 	/* No file to load? */
 	if (fn == NULL)
@@ -553,13 +709,13 @@ bool load_auth_file(const char *fn)
 			log_error("broken auth file");
 			break;
 		}
-		user = ++p;
+		username = ++p;
 		p = find_quote(p, false);
 		if (*p != '"') {
 			log_error("broken auth file");
 			break;
 		}
-		if (p - user >= MAX_USERNAME) {
+		if (p - username >= MAX_USERNAME) {
 			log_error("username too long in auth file");
 			break;
 		}
@@ -584,7 +740,8 @@ bool load_auth_file(const char *fn)
 		*p++ = 0; /* tag password end */
 
 		/* send them away */
-		unquote_add_user(user, password);
+		user = unquote_add_user(username, password);
+		user->from_auth_file = true;
 
 		/* skip rest of the line */
 		while (*p && *p != '\n') p++;

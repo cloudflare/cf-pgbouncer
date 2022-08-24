@@ -2,6 +2,7 @@
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
  *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
+ * Copyright (c) 2022 Cloudflare, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -306,23 +307,24 @@ static bool login_clear_psw(PgSocket *server)
 {
 	PgUser *user = get_srv_psw(server);
 	slog_debug(server, "P: send clear password");
-	return send_password(server, user->passwd);
+	return send_password(server, user_password(user, client_database(server)));
 }
 
 static bool login_md5_psw(PgSocket *server, const uint8_t *salt)
 {
 	char txt[MD5_PASSWD_LEN + 1], *src;
 	PgUser *user = get_srv_psw(server);
+	char *real_passwd = user_password(user, client_database(server));
 
 	slog_debug(server, "P: send md5 password");
 
-	switch (get_password_type(user->passwd)) {
+	switch (get_password_type(real_passwd)) {
 	case PASSWORD_TYPE_PLAINTEXT:
-		pg_md5_encrypt(user->passwd, user->name, strlen(user->name), txt);
+		pg_md5_encrypt(real_passwd, user->name, strlen(user->name), txt);
 		src = txt + 3;
 		break;
 	case PASSWORD_TYPE_MD5:
-		src = user->passwd + 3;
+		src = real_passwd + 3;
 		break;
 	default:
 		slog_error(server, "cannot do MD5 authentication: wrong password type");
@@ -338,10 +340,11 @@ static bool login_md5_psw(PgSocket *server, const uint8_t *salt)
 static bool login_scram_sha_256(PgSocket *server)
 {
 	PgUser *user = get_srv_psw(server);
+	const char *real_passwd = user_password(user, client_database(server));
 	bool res;
 	char *client_first_message = NULL;
 
-	switch (get_password_type(user->passwd)) {
+	switch (get_password_type(real_passwd)) {
 	case PASSWORD_TYPE_PLAINTEXT:
 		/* ok */
 		break;
@@ -413,7 +416,7 @@ static bool login_scram_sha_256_cont(PgSocket *server, unsigned datalen, const u
 		goto failed;
 
 	client_final_message = build_client_final_message(&server->scram_state,
-							  user, server_nonce,
+							  user, client_database(server), server_nonce,
 							  salt, saltlen, iterations);
 
 	free(salt);

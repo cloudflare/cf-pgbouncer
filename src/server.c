@@ -2,6 +2,7 @@
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
  *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
+ * Copyright (c) 2022 Cloudflare, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -203,10 +204,17 @@ int pool_pool_mode(PgPool *pool)
 
 int pool_pool_size(PgPool *pool)
 {
-	if (pool->db->pool_size < 0)
-		return cf_default_pool_size;
-	else
+	/* both database and user max pool limits are not configured */
+	if (pool->db->pool_size < 0 && pool->pool_size < 0)
+		return max(cf_default_pool_size, 0);
+	/* max pool limit is only configured for database */
+	if (pool->pool_size < 0)
 		return pool->db->pool_size;
+	/* max pool limit is only configured for pool */
+	if (pool->db->pool_size < 0)
+		return pool->pool_size;
+	/* max pool limit is configured for both, apply most restrictive */
+	return min(pool->db->pool_size, pool->pool_size);
 }
 
 int pool_min_pool_size(PgPool *pool)
@@ -241,6 +249,69 @@ int user_max_connections(PgUser *user)
 	} else {
 		return user->max_user_connections;
 	}
+}
+
+bool user_requires_auth_query(PgUser *user)
+{
+	/* users defined in auth_file with password do not require an auth_query */
+	return cf_auth_type != AUTH_TRUST && !user->from_auth_file;
+}
+
+void user_passwd_free(struct AANode *node, void *arg)
+{
+	PgUserPassword *user_passwd = container_of(node, PgUserPassword, tree_node);
+	free(user_passwd);
+	user_passwd = NULL;
+}
+
+/* compare string with PgUserPassword->username, for usage with btree */
+int user_passwd_node_cmp(uintptr_t user_passwd_ptr, struct AANode *node)
+{
+	const char *name = (const char *)user_passwd_ptr;
+	PgUserPassword *user_passwd = container_of(node, PgUserPassword, tree_node);
+	return strcmp(name, user_passwd->username);
+}
+
+char *user_password(PgUser *user, PgDatabase *db)
+{
+	PgUserPassword *user_passwd = NULL;
+	struct AANode *node;
+
+	if (db == NULL || user == db->forced_user || user->from_auth_file)
+		return user->passwd;
+
+	node = aatree_search(&db->user_passwds, (uintptr_t)user->name);
+	if (node == NULL)
+		return "";
+
+	user_passwd = container_of(node, PgUserPassword, tree_node);
+	return user_passwd->passwd;
+}
+
+void database_add_user_password(PgDatabase *db, const char *username, const char *passwd)
+{
+	PgUserPassword *user_passwd = NULL;
+	struct AANode *node;
+
+	if (db == NULL || username == NULL)
+		return;
+
+	node = aatree_search(&db->user_passwds, (uintptr_t)username);
+	if (node != NULL) {
+		/* already exists */
+		user_passwd = container_of(node, PgUserPassword, tree_node);
+		safe_strcpy(user_passwd->passwd, passwd, sizeof(user_passwd->passwd));
+		return;
+	}
+
+	/* create struct */
+	user_passwd = calloc(1, sizeof(*user_passwd));
+	if (user_passwd == NULL)
+		return;
+	safe_strcpy(user_passwd->username, username, sizeof(user_passwd->username));
+	safe_strcpy(user_passwd->passwd, passwd, sizeof(user_passwd->passwd));
+
+	aatree_insert(&db->user_passwds, (uintptr_t)user_passwd->username, &user_passwd->tree_node);
 }
 
 /* process packets on logged in connection */

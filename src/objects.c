@@ -2,6 +2,7 @@
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
  *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
+ * Copyright (c) 2022 Cloudflare, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -28,7 +29,6 @@
 #include <usual/slab.h>
 
 /* those items will be allocated as needed, never freed */
-STATLIST(user_list);
 STATLIST(database_list);
 STATLIST(pool_list);
 
@@ -106,13 +106,6 @@ static int user_node_cmp(uintptr_t userptr, struct AANode *node)
 	const char *name = (const char *)userptr;
 	PgUser *user = container_of(node, PgUser, tree_node);
 	return strcmp(name, user->name);
-}
-
-/* destroy PgUser, for usage with btree */
-static void user_node_release(struct AANode *node, void *arg)
-{
-	PgUser *user = container_of(node, PgUser, tree_node);
-	slab_free(user_cache, user);
 }
 
 /* initialization before config loading */
@@ -287,14 +280,6 @@ static int cmp_pool(struct List *i1, struct List *i2)
 	return 0;
 }
 
-/* compare user names, for use with put_in_order */
-static int cmp_user(struct List *i1, struct List *i2)
-{
-	PgUser *u1 = container_of(i1, PgUser, head);
-	PgUser *u2 = container_of(i2, PgUser, head);
-	return strcmp(u1->name, u2->name);
-}
-
 /* compare db names, for use with put_in_order */
 static int cmp_database(struct List *i1, struct List *i2)
 {
@@ -334,12 +319,12 @@ PgDatabase *add_database(const char *name)
 			return NULL;
 
 		list_init(&db->head);
+		aatree_init(&db->user_passwds, user_passwd_node_cmp, user_passwd_free);
 		if (strlcpy(db->name, name, sizeof(db->name)) >= sizeof(db->name)) {
 			log_warning("too long db name: %s", name);
 			slab_free(db_cache, db);
 			return NULL;
 		}
-		aatree_init(&db->user_tree, user_node_cmp, user_node_release);
 		put_in_order(&db->head, &database_list, cmp_database);
 	}
 
@@ -375,37 +360,10 @@ PgUser *add_user(const char *name, const char *passwd)
 		if (!user)
 			return NULL;
 
-		list_init(&user->head);
 		list_init(&user->pool_list);
 		safe_strcpy(user->name, name, sizeof(user->name));
-		put_in_order(&user->head, &user_list, cmp_user);
 
 		aatree_insert(&user_tree, (uintptr_t)user->name, &user->tree_node);
-		user->pool_mode = POOL_INHERIT;
-	}
-	safe_strcpy(user->passwd, passwd, sizeof(user->passwd));
-	return user;
-}
-
-/* add or update db users */
-PgUser *add_db_user(PgDatabase *db, const char *name, const char *passwd)
-{
-	PgUser *user = NULL;
-	struct AANode *node;
-
-	node = aatree_search(&db->user_tree, (uintptr_t)name);
-	user = node ? container_of(node, PgUser, tree_node) : NULL;
-
-	if (user == NULL) {
-		user = slab_alloc(user_cache);
-		if (!user)
-			return NULL;
-
-		list_init(&user->head);
-		list_init(&user->pool_list);
-		safe_strcpy(user->name, name, sizeof(user->name));
-
-		aatree_insert(&db->user_tree, (uintptr_t)user->name, &user->tree_node);
 		user->pool_mode = POOL_INHERIT;
 	}
 	safe_strcpy(user->passwd, passwd, sizeof(user->passwd));
@@ -425,8 +383,6 @@ PgUser *add_pam_user(const char *name, const char *passwd)
 		user = slab_alloc(user_cache);
 		if (!user)
 			return NULL;
-
-		list_init(&user->head);
 		list_init(&user->pool_list);
 		safe_strcpy(user->name, name, sizeof(user->name));
 
@@ -446,7 +402,6 @@ PgUser *force_user(PgDatabase *db, const char *name, const char *passwd)
 		user = slab_alloc(user_cache);
 		if (!user)
 			return NULL;
-		list_init(&user->head);
 		list_init(&user->pool_list);
 		user->pool_mode = POOL_INHERIT;
 	}
@@ -490,6 +445,22 @@ PgUser *find_user(const char *name)
 	return user;
 }
 
+static void walk_user(struct AANode *n, void *arg)
+{
+	struct UserWalkInfo *w = arg;
+	struct PgUser *user = container_of(n, struct PgUser, tree_node);
+
+	w->user_cb(w->arg, user);
+}
+
+void walk_users(walk_user_f cb, void *arg)
+{
+	struct UserWalkInfo w;
+	w.user_cb = cb;
+	w.arg = arg;
+	aatree_walk(&user_tree, AA_WALK_IN_ORDER, walk_user, &w);
+}
+
 /* create new pool object */
 static PgPool *new_pool(PgDatabase *db, PgUser *user)
 {
@@ -504,6 +475,8 @@ static PgPool *new_pool(PgDatabase *db, PgUser *user)
 
 	pool->user = user;
 	pool->db = db;
+	/* pool will use default_pool_size until overridden */
+	pool->pool_size = -1;
 
 	statlist_init(&pool->active_client_list, "active_client_list");
 	statlist_init(&pool->waiting_client_list, "waiting_client_list");
@@ -986,6 +959,7 @@ void disconnect_client(PgSocket *client, bool notify, const char *reason, ...)
 		client->login_user = NULL;
 	}
 	if (client->db && client->db->fake) {
+		aatree_destroy(&client->db->user_passwds);
 		free(client->db);
 		client->db = NULL;
 	}
@@ -1185,8 +1159,24 @@ bool evict_connection(PgDatabase *db)
 	return false;
 }
 
+/* evict the single most idle connection from pool */
+static bool evict_idle_pool_connection(PgPool *pool)
+{
+	PgSocket *oldest_connection = NULL;
+
+	oldest_connection = last_socket(&pool->used_server_list);
+	if (!oldest_connection)
+		oldest_connection = last_socket(&pool->idle_server_list);
+
+	if (oldest_connection) {
+		disconnect_server(oldest_connection, true, "evicted");
+		return true;
+	}
+	return false;
+}
+
 /* evict the single most idle connection from among all pools to make room in the user */
-bool evict_user_connection(PgUser *user)
+bool evict_idle_user_connection(PgUser *user)
 {
 	struct List *item;
 	PgPool *pool;
@@ -1209,6 +1199,107 @@ bool evict_user_connection(PgUser *user)
 		return true;
 	}
 	return false;
+}
+
+/* evict the single oldest active connection from among all pools to make room in the user */
+static bool evict_active_user_connection(PgUser *user)
+{
+	struct List *item;
+	PgPool *pool;
+	PgSocket *oldest_connection = NULL;
+
+	statlist_for_each(item, &pool_list) {
+		pool = container_of(item, PgPool, head);
+		if (pool->user != user)
+			continue;
+		oldest_connection = compare_connections_by_time(oldest_connection, last_socket(&pool->active_server_list));
+	}
+
+	if (oldest_connection) {
+		disconnect_server(oldest_connection, true, "evicted");
+		return true;
+	}
+	return false;
+}
+
+static void enforce_user_connection_limit(PgUser *user)
+{
+	int max = user_max_connections(user);
+	/* no limit to enforce if user is allocated unlimited connections */
+	if (max <= 0)
+		return;
+
+	while (user->connection_count > max) {
+		if (evict_idle_user_connection(user))
+			continue;
+		if (evict_active_user_connection(user))
+			continue;
+		/* user has no idle, unused or active connections to evict */
+		return;
+	}
+}
+
+void handle_user_cf_update(evutil_socket_t sock, short flags, void *arg)
+{
+	PgUserEvent *user_event = (PgUserEvent*)arg;
+	enforce_user_connection_limit(user_event->user);
+	event_free(user_event->ev);
+	free(user_event);
+}
+
+void notify_user_event(PgUser *user, event_callback_fn cb) {
+	struct PgUserEvent *user_event;
+	if (pgb_event_base == NULL)
+		return;
+
+	user_event = malloc(sizeof(PgUserEvent));
+	if (user_event == NULL) {
+		log_error("could not allocate user event: %s", strerror(errno));
+		return;
+	}
+
+	user_event->user = user;
+	user_event->ev = event_new(pgb_event_base, -1, 0, cb, user_event);
+	event_active(user_event->ev, EV_TIMEOUT, 0);
+}
+
+static void enforce_pool_connection_limit(PgPool *pool)
+{
+	PgSocket *oldest_connection = NULL;
+	int max = pool_pool_size(pool);
+
+	while (pool_connected_server_count(pool) > max) {
+		if (evict_idle_pool_connection(pool))
+			continue;
+		if ((oldest_connection = last_socket(&pool->active_server_list)) == NULL)
+			return;
+
+		disconnect_server(oldest_connection, true, "evicted");
+	}
+}
+
+void handle_pool_cf_update(evutil_socket_t sock, short flags, void *arg)
+{
+	PgPoolEvent *pool_event = (PgPoolEvent*)arg;
+	enforce_pool_connection_limit(pool_event->pool);
+	event_free(pool_event->ev);
+	free(pool_event);
+}
+
+void notify_pool_event(PgPool *pool, event_callback_fn cb) {
+	struct PgPoolEvent *pool_event;
+	if (pgb_event_base == NULL)
+		return;
+
+	pool_event = malloc(sizeof(PgUserEvent));
+	if (pool_event == NULL) {
+		log_error("could not allocate user event: %s", strerror(errno));
+		return;
+	}
+
+	pool_event->pool = pool;
+	pool_event->ev = event_new(pgb_event_base, -1, 0, cb, pool_event);
+	event_active(pool_event->ev, EV_TIMEOUT, 0);
 }
 
 /* the pool needs new connection, if possible */
@@ -1275,11 +1366,26 @@ allow_new:
 		}
 	}
 
+	max = pool_pool_size(pool) + pool_res_pool_size(pool);
+	if (max > 0) {
+		/* try to evict unused connections first */
+		while (pool_connected_server_count(pool) >= max) {
+			if (!evict_idle_pool_connection(pool)) {
+				break;
+			}
+		}
+		if (pool_connected_server_count(pool) >= max) {
+			log_debug("launch_new_connection: pool '%s.%s' full (%d >= %d)",
+					  pool->user->name, pool->db->name, pool_connected_server_count(pool), max);
+			return;
+		}
+	}
+
 	max = user_max_connections(pool->user);
 	if (max > 0) {
 		/* try to evict unused connection first */
 		while (pool->user->connection_count >= max) {
-			if (!evict_user_connection(pool->user)) {
+			if (!evict_idle_user_connection(pool->user)) {
 				break;
 			}
 		}
@@ -1512,7 +1618,7 @@ bool use_client_socket(int fd, PgAddr *addr,
 		}
 		user = find_user(username);
 		if (!user && db->auth_user)
-			user = add_db_user(db, username, password);
+			user = add_user(username, password);
 
 		if (!user)
 			return false;
@@ -1579,7 +1685,7 @@ bool use_server_socket(int fd, PgAddr *addr,
 		user = find_user(username);
 	}
 	if (!user && db->auth_user)
-		user = add_db_user(db, username, password);
+		user = add_user(username, password);
 
 	pool = get_pool(db, user);
 	if (!pool)
@@ -1836,7 +1942,6 @@ void objects_cleanup(void)
 	}
 
 	memset(&login_client_list, 0, sizeof login_client_list);
-	memset(&user_list, 0, sizeof user_list);
 	memset(&database_list, 0, sizeof database_list);
 	memset(&pool_list, 0, sizeof pool_list);
 	memset(&user_tree, 0, sizeof user_tree);
